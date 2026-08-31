@@ -4,13 +4,17 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
-# Credentials — this repo is public
-*.json
+# Credentials — this repo is public.
+# Defence in depth only. The primary control is that no key file is ever
+# written: ADC locally, Workload Identity Federation in CI.
 .env
 .env.*
 credentials/
 service-account*.json
 *-key.json
+*credentials*.json
+gha-creds-*.json
+client_secret*.json
 
 # dbt
 dbt/target/

@@ -1,0 +1,6 @@
+# Phase 1: extract StatsBomb open data to GCS.
+# Python 3.11 (see PROJECT.md). Auth is Application Default Credentials —
+# no service account key file is ever written.
+
+statsbombpy
+google-cloud-storage
