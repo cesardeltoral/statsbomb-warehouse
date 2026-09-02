@@ -31,6 +31,7 @@ demonstrate.
 dags/                    Airflow DAGs
   football_pipeline.py
 extract/                 Python extraction to GCS
+load/                    GCS to BigQuery external tables
 dbt/
   models/
     staging/             1:1 with raw, light cleaning only
@@ -74,6 +75,17 @@ written until they are filled in.
 
 ### Warehouse
 
+- Raw layer: `ext_<entity>`, BigQuery external tables over the GCS objects.
+  Every one is a single `raw_json STRING` column plus hive partition columns
+  read from the object path. The raw layer stores what landed and interprets
+  nothing; typed extraction is the staging layer's job. Schema autodetect was
+  rejected: one season of events has 205 distinct field paths, autodetect
+  inferred 38 columns and then failed the read on `dribble.overrun`, and
+  `ignore_unknown_values` would have dropped fields silently.
+- Parsing the raw layer needs
+  `SAFE.PARSE_JSON(raw_json, wide_number_mode => 'round')`. StatsBomb's xG and
+  pass-angle floats do not round-trip exactly, and strict `PARSE_JSON` rejects
+  267 of 139,030 rows in the pilot season.
 - Staging models: `stg_<source>__<entity>`, one per raw table, no joins, no
   business logic
 - Marts: `dim_<entity>`, `fct_<process>`
@@ -129,6 +141,11 @@ These are the interview follow-up questions. Build them in, do not retrofit.
   Set `maximum_bytes_billed` in `profiles.yml` and a per-day custom quota on
   the project, so a runaway query fails instead of billing. The real cost risk
   during development is repeated `dbt build --full-refresh`.
+  Caveat measured in Phase 2: BigQuery cannot dry-run-estimate an external
+  table, so a pre-flight cost preview returns 0 bytes and tells you nothing.
+  `maximum_bytes_billed` still enforces a ceiling by aborting mid-query, but
+  cost is only observable after the fact. Native tables restore estimation,
+  which is one argument for materialising rather than querying externals.
 
 ## Working agreement
 
