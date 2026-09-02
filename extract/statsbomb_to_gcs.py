@@ -17,23 +17,35 @@ Payload fidelity
     derived columns. Verified by ``--verify``, which re-fetches the source
     files and asserts value equality.
 
+    Objects are newline-delimited JSON: one record per line. This is forced,
+    not chosen — BigQuery has no reader for a JSON array, and a file holding
+    ``[{...},{...}]`` fails schema detection with "No object found when new
+    array is started". Only the container changes; each record is still
+    exactly what StatsBomb published.
+
     Note the payload is *value*-identical, not byte-identical: the source is
     pretty-printed by a Java JSON writer whose spacing Python cannot
     reproduce. We serialise canonically and compactly instead, which is
-    deterministic — the same input always produces the same bytes — and about
-    30% smaller. Whitespace carries no meaning to BigQuery.
+    deterministic — the same input always produces the same bytes — and
+    materially smaller. Whitespace carries no meaning to BigQuery.
 
 Layout
     Hive-style prefixes, one object per match::
 
-        <prefix>/competitions/competitions.json
-        <prefix>/matches/competition_id=11/season_id=90/matches.json
-        <prefix>/events/competition_id=11/season_id=90/match_id=3773386.json
-        <prefix>/lineups/competition_id=11/season_id=90/match_id=3773386.json
+        <prefix>/competitions/competitions.ndjson
+        <prefix>/matches/competition_id=11/season_id=90/matches.ndjson
+        <prefix>/events/competition_id=11/season_id=90/match_id=3773386/events.ndjson
+        <prefix>/lineups/competition_id=11/season_id=90/match_id=3773386/lineups.ndjson
 
     Phase 2 reads these with hive partitioning enabled, so ``competition_id``,
     ``season_id`` and ``match_id`` arrive as real columns without the payload
     having to carry them.
+
+    ``match_id`` is a *directory*, not part of the filename, and that is
+    load-bearing. BigQuery derives hive partition keys from directory
+    components only; with ``match_id=3773386.json`` as a filename it silently
+    yields competition_id and season_id and no match_id at all. Verified
+    against BigQuery before this layout was settled.
 
 Idempotency
     Every path is a pure function of the ids in it, and uploads overwrite. A
@@ -94,14 +106,19 @@ INJECTED_KEYS = {"events": ("match_id",)}
 # --------------------------------------------------------------------------
 
 
-def canonical_json(records: list[dict[str, Any]]) -> bytes:
-    """Serialise deterministically: same records in, same bytes out.
+def canonical_ndjson(records: list[dict[str, Any]]) -> bytes:
+    """Serialise to newline-delimited JSON: one record per line.
 
-    Key order is preserved as StatsBomb published it rather than sorted, so a
-    diff against the source shows only whitespace. Determinism is what lets us
-    claim a re-run is a no-op at the byte level.
+    Deterministic — same records in, same bytes out — which is what lets us
+    claim a re-run is a no-op at the byte level. Key order is preserved as
+    StatsBomb published it rather than sorted, so a diff against the source
+    shows only formatting.
+
+    NDJSON rather than a JSON array because BigQuery cannot read an array;
+    see this module's docstring.
     """
-    return json.dumps(records, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    lines = (json.dumps(r, separators=(",", ":"), ensure_ascii=False) for r in records)
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 def strip_injected(records: Iterable[dict[str, Any]], entity: str) -> list[dict[str, Any]]:
@@ -164,17 +181,22 @@ def fetch_lineups(match_id: int) -> list[dict[str, Any]]:
 
 def competitions_path(prefix: str) -> str:
     """Not season-scoped: the competitions index describes every season."""
-    return f"{prefix}/competitions/competitions.json"
+    return f"{prefix}/competitions/competitions.ndjson"
 
 
 def matches_path(prefix: str, competition_id: int, season_id: int) -> str:
-    return f"{prefix}/matches/competition_id={competition_id}/season_id={season_id}/matches.json"
+    return f"{prefix}/matches/competition_id={competition_id}/season_id={season_id}/matches.ndjson"
 
 
 def match_scoped_path(prefix: str, entity: str, competition_id: int, season_id: int, match_id: int) -> str:
+    """match_id is a directory, not part of the filename.
+
+    BigQuery reads hive partition keys from directory components only, so
+    ``match_id=<id>.ndjson`` would not surface match_id as a column.
+    """
     return (
         f"{prefix}/{entity}/competition_id={competition_id}"
-        f"/season_id={season_id}/match_id={match_id}.json"
+        f"/season_id={season_id}/match_id={match_id}/{entity}.ndjson"
     )
 
 
@@ -213,7 +235,7 @@ class Uploader:
             self._bucket = client.bucket(bucket_name)
 
     def put(self, path: str, records: list[dict[str, Any]], stats: RunStats) -> int:
-        payload = canonical_json(records)
+        payload = canonical_ndjson(records)
         if self.dry_run:
             LOG.info("[dry-run] gs://%s/%s (%d records, %d bytes)", self.bucket_name, path, len(records), len(payload))
             stats.objects_written += 1
@@ -228,7 +250,7 @@ class Uploader:
 
         # Overwrites by default. That is the idempotency guarantee: the path is
         # derived from the ids, so a re-run rewrites rather than appends.
-        blob.upload_from_string(payload, content_type="application/json")
+        blob.upload_from_string(payload, content_type="application/x-ndjson")
         LOG.info("wrote gs://%s/%s (%d records, %d bytes)", self.bucket_name, path, len(records), len(payload))
         stats.objects_written += 1
         stats.bytes_written += len(payload)
